@@ -283,8 +283,8 @@ public class AuthorizationCodeGrantHandler extends AbstractAuthorizationGrantHan
 
     private String buildCacheKeyForToken(String clientId, AuthzCodeDO authzCodeDO) {
         String scope = OAuth2Util.buildScopeString(authzCodeDO.getScope());
-        String authorizedUser = authzCodeDO.getAuthorizedUser().toString();
-        return buildCacheKeyStringForToken(clientId, scope, authorizedUser);
+        String authorizedUser = authzCodeDO.getAuthorizedUser().toString(); //TODO:#FIDP-FIX:user tostring
+        return buildCacheKeyStringForToken(clientId, scope, authorizedUser); //TODO:#FIDP-FIX:add fidp
     }
 
     /**
