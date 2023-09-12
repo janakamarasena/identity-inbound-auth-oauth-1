@@ -54,6 +54,8 @@ public class OAuthMessage {
     protected boolean isPassiveAuthentication = false;
     protected String sessionDataKeyFromConsent;
 
+    private boolean isAPIBasedAuthRequest = false;
+
     protected OAuthMessage(HttpServletRequest request, HttpServletResponse response) {
 
         this.request = request;
@@ -71,6 +73,10 @@ public class OAuthMessage {
             cacheKey = new SessionDataCacheKey(sessionDataKeyFromConsent);
             resultFromConsent = SessionDataCache.getInstance().getValueFromCache(cacheKey);
             SessionDataCache.getInstance().clearCacheEntry(cacheKey);
+        }
+
+        if (Boolean.TRUE.equals(request.getAttribute("isApiBasedAuthRequest"))) {
+            this.isAPIBasedAuthRequest = true;
         }
     }
 
@@ -253,6 +259,11 @@ public class OAuthMessage {
     public String getOauthPKCECodeChallengeMethod() {
 
         return request.getParameter(OAuthConstants.OAUTH_PKCE_CODE_CHALLENGE_METHOD);
+    }
+
+    public boolean isAPIBasedAuthRequest() {
+
+        return isAPIBasedAuthRequest;
     }
 
     @Override
