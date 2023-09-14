@@ -27,6 +27,7 @@ import org.apache.commons.lang.ArrayUtils;
 import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.http.HttpStatus;
 import org.apache.http.NameValuePair;
 import org.apache.http.client.utils.URIBuilder;
 import org.apache.oltu.oauth2.as.request.OAuthAuthzRequest;
@@ -36,9 +37,12 @@ import org.apache.oltu.oauth2.common.error.OAuthError;
 import org.apache.oltu.oauth2.common.exception.OAuthProblemException;
 import org.apache.oltu.oauth2.common.exception.OAuthSystemException;
 import org.apache.oltu.oauth2.common.message.OAuthResponse;
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 import org.owasp.encoder.Encode;
+import org.wso2.carbon.base.ServerConfiguration;
+import org.wso2.carbon.identity.application.authentication.framework.AuthenticationService;
 import org.wso2.carbon.identity.application.authentication.framework.AuthenticatorFlowStatus;
 import org.wso2.carbon.identity.application.authentication.framework.CommonAuthenticationHandler;
 import org.wso2.carbon.identity.application.authentication.framework.cache.AuthenticationResultCacheEntry;
@@ -46,15 +50,22 @@ import org.wso2.carbon.identity.application.authentication.framework.config.mode
 import org.wso2.carbon.identity.application.authentication.framework.context.AuthHistory;
 import org.wso2.carbon.identity.application.authentication.framework.context.SessionContext;
 import org.wso2.carbon.identity.application.authentication.framework.exception.UserIdNotFoundException;
+import org.wso2.carbon.identity.application.authentication.framework.exception.auth.service.AuthServiceException;
 import org.wso2.carbon.identity.application.authentication.framework.handler.request.impl.consent.ClaimMetaData;
 import org.wso2.carbon.identity.application.authentication.framework.handler.request.impl.consent.ConsentClaimsData;
 import org.wso2.carbon.identity.application.authentication.framework.handler.request.impl.consent.exception.SSOConsentServiceException;
 import org.wso2.carbon.identity.application.authentication.framework.model.AuthenticatedUser;
 import org.wso2.carbon.identity.application.authentication.framework.model.AuthenticationResult;
+import org.wso2.carbon.identity.application.authentication.framework.model.AuthenticatorData;
+import org.wso2.carbon.identity.application.authentication.framework.model.AuthenticatorParamMetadata;
 import org.wso2.carbon.identity.application.authentication.framework.model.CommonAuthRequestWrapper;
 import org.wso2.carbon.identity.application.authentication.framework.model.CommonAuthResponseWrapper;
+import org.wso2.carbon.identity.application.authentication.framework.model.auth.service.AuthServiceRequest;
+import org.wso2.carbon.identity.application.authentication.framework.model.auth.service.AuthServiceResponse;
+import org.wso2.carbon.identity.application.authentication.framework.model.auth.service.AuthServiceResponseData;
 import org.wso2.carbon.identity.application.authentication.framework.util.FrameworkConstants;
 import org.wso2.carbon.identity.application.authentication.framework.util.FrameworkUtils;
+import org.wso2.carbon.identity.application.authentication.framework.util.auth.service.AuthServiceConstants;
 import org.wso2.carbon.identity.application.common.model.Claim;
 import org.wso2.carbon.identity.application.common.model.ClaimMapping;
 import org.wso2.carbon.identity.application.common.model.ServiceProvider;
@@ -125,8 +136,13 @@ import org.wso2.carbon.utils.DiagnosticLog;
 
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
+import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.net.URL;
+import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -344,7 +360,7 @@ public class OAuth2AuthzEndpoint {
     @POST
     @Path("/")
     @Consumes("application/x-www-form-urlencoded")
-    @Produces("text/html")
+    @Produces({"text/html", "application/json"})
     public Response authorizePost(@Context HttpServletRequest request, @Context HttpServletResponse response,
                                   MultivaluedMap paramMap)
             throws URISyntaxException, InvalidRequestParentException {
@@ -358,7 +374,163 @@ public class OAuth2AuthzEndpoint {
                     .build();
         }
         HttpServletRequestWrapper httpRequest = new OAuthRequestWrapper(request, paramMap);
-        return authorize(httpRequest, response);
+        httpRequest.setAttribute("isApiBasedAuthRequest", true);
+
+        Response res = authorize(httpRequest, response);
+        AuthServiceResponse authServiceResponse = getAuthServiceResponse(httpRequest);
+        if (authServiceResponse != null) {
+            if (AuthServiceConstants.FlowStatus.INCOMPLETE == authServiceResponse.getFlowStatus()) {
+                return buildIntermediateResponseA(authServiceResponse);
+            } else if (AuthServiceConstants.FlowStatus.SUCCESS_COMPLETED == authServiceResponse.getFlowStatus()) {
+                return buildFinalResponseA(res);
+            }
+        }
+        // extract the query params from the redirect url and set them as a json response
+
+        return res;
+    }
+
+    private AuthServiceResponse getAuthServiceResponse(HttpServletRequest request) {
+
+        return (AuthServiceResponse) request.getAttribute("authenticationServiceResponse");
+    }
+
+    // create a http post method called passThrough that accepts a map of params and return a json response
+    @POST
+    @Path("/passThrough")
+    @Consumes("application/json")
+    @Produces("application/json")
+    public Response passThrough(@Context HttpServletRequest request, String payload, @Context HttpServletResponse response) throws InvalidRequestParentException, URISyntaxException {
+
+        // payload to map
+        Map<String, String> params = new Gson().fromJson(payload, new TypeToken<Map<String, String>>() {
+        }.getType());
+
+        // params to the format  Map<String, String[]>
+        Map<String, String[]> paramsList = new HashMap<>();
+        for (Map.Entry<String, String> entry : params.entrySet()) {
+            paramsList.put(entry.getKey(), new String[]{entry.getValue()});
+        }
+
+        AuthServiceResponse authServiceResponse;
+        try {
+            AuthenticationService authenticationService = new AuthenticationService();
+             authServiceResponse = authenticationService.
+                    handleAuthentication(new AuthServiceRequest(request, response, paramsList));
+        } catch (Exception e) {
+            log.error("Error while processing the request", e);
+            return Response.status(HttpServletResponse.SC_INTERNAL_SERVER_ERROR).entity(e.getMessage()).build();
+        }
+
+        if (AuthServiceConstants.FlowStatus.SUCCESS_COMPLETED == authServiceResponse.getFlowStatus()) {
+            return buildFinalAuthzCallA(request, response, authServiceResponse);
+        }
+
+        return buildIntermediateResponseA(authServiceResponse);
+    }
+
+    private Response buildIntermediateResponseA(AuthServiceResponse authServiceResponse) {
+
+        // queryParams to json string
+        String sessionDataKey = authServiceResponse.getSessionDataKey();
+
+        JSONObject payload = new JSONObject();
+        payload.put("flowId", sessionDataKey);
+
+       authServiceResponse.getData().ifPresent(authServiceResponseData -> {
+
+        if (CollectionUtils.isNotEmpty(authServiceResponseData.getAuthenticatorOptions())) {
+
+            List<AuthenticatorData> authenticatorDataList = authServiceResponseData.getAuthenticatorOptions();
+            AuthenticatorData authenticatorData = authenticatorDataList.get(0);
+            List<AuthenticatorParamMetadata> authenticatorParams = authenticatorData.getAuthParams();
+            // create a json array with requred params, param name and param type
+            JSONArray requiredParams = new JSONArray();
+            for (AuthenticatorParamMetadata authenticatorParam : authenticatorParams) {
+                JSONObject param = new JSONObject();
+                param.put("param", authenticatorParam.getName());
+                param.put("type", authenticatorParam.getType());
+                param.put("isConfidential", authenticatorParam.isConfidential());
+                param.put("order", authenticatorParam.getParamOrder());
+                param.put("group", authenticatorParam.getParamGroup());
+
+                requiredParams.put(param);
+            }
+            payload.put("requiredAuthParams", requiredParams);
+
+            if (MapUtils.isNotEmpty(authenticatorData.getAdditionalData())) {
+                payload.put("additionalData", authenticatorData.getAdditionalData());
+            }
+        }
+
+        if (authServiceResponseData.isAuthenticatorSelectionRequired()) {
+            List<AuthenticatorData> authenticatorDataList = authServiceResponseData.getAuthenticatorOptions();
+            JSONArray authenticators = new JSONArray();
+            // create a JSONArray with a JSONObject with authenticator names and authenticator display names and authenticator Idp
+            for (AuthenticatorData authenticatorData : authenticatorDataList) {
+                JSONObject authenticator = new JSONObject();
+                authenticator.put("authenticator", authenticatorData.getName());
+                authenticator.put("displayName", authenticatorData.getDisplayName());
+                authenticator.put("idp", authenticatorData.getIdp());
+                authenticators.put(authenticator);
+            }
+            payload.put("Authenticators", authenticators);
+        }
+       });
+
+        authServiceResponse.getErrorInfo().ifPresent(errorInfo -> {
+            JSONObject error = new JSONObject();
+            error.put("errorCode", errorInfo.getErrorCode());
+            error.put("errorMessage", errorInfo.getErrorMessage());
+            payload.put("error", error);
+        });
+
+        String json = payload.toString();
+        return Response.status(HttpServletResponse.SC_OK).entity(json).build();
+    }
+
+    private Response buildFinalAuthzCallA(HttpServletRequest request, HttpServletResponse response,
+                                          AuthServiceResponse authServiceResponse) throws InvalidRequestParentException, URISyntaxException {
+
+        String callerSessionDataKey = authServiceResponse.getSessionDataKey();
+
+        Map<String, List<String>> internalParamsList = new HashMap<>();
+        // add callerSessionDataKey to internalParamsList map
+        internalParamsList.put(FrameworkConstants.SESSION_DATA_KEY, Collections.singletonList(callerSessionDataKey));
+        OAuthRequestWrapper internalRequest = new OAuthRequestWrapper(request, internalParamsList);
+        internalRequest.setInternalRequest(true);
+
+        Response res = authorize(internalRequest, response);
+
+       return buildFinalResponseA(res);
+    }
+
+    private Response buildFinalResponseA(Response res) {
+
+        String redUrl = res.getMetadata().get("Location").get(0).toString();
+        Map<String, String> queryParams = getQueryParams(redUrl);
+        // queryParams to json string
+        String json = new Gson().toJson(queryParams);
+        return Response.status(HttpServletResponse.SC_OK).entity(json).build();
+    }
+
+    //method getQueryParams to extract query params from the redirect url and set them as a json response
+    private Map<String, String> getQueryParams(String redirectUrl) {
+
+        Map<String, String> queryParams = new HashMap<>();
+        try {
+            URI uri = new URI(redirectUrl);
+            String query = uri.getQuery();
+            String[] pairs = query.split("&");
+            for (String pair : pairs) {
+                int idx = pair.indexOf("=");
+                queryParams.put(URLDecoder.decode(pair.substring(0, idx), "UTF-8"),
+                        URLDecoder.decode(pair.substring(idx + 1), "UTF-8"));
+            }
+        } catch (URISyntaxException | UnsupportedEncodingException e) {
+            log.error("Error while parsing the redirect url: " + redirectUrl, e);
+        }
+        return queryParams;
     }
 
     private Response handleInvalidRequest(OAuthMessage oAuthMessage) throws URISyntaxException {
@@ -3690,14 +3862,22 @@ public class OAuth2AuthzEndpoint {
             String sessionDataKey =
                     (String) oAuthMessage.getRequest().getAttribute(FrameworkConstants.SESSION_DATA_KEY);
 
-            CommonAuthenticationHandler commonAuthenticationHandler = new CommonAuthenticationHandler();
 
             CommonAuthRequestWrapper requestWrapper = new CommonAuthRequestWrapper(oAuthMessage.getRequest());
             requestWrapper.setParameter(FrameworkConstants.SESSION_DATA_KEY, sessionDataKey);
             requestWrapper.setParameter(FrameworkConstants.RequestParams.TYPE, type);
 
             CommonAuthResponseWrapper responseWrapper = new CommonAuthResponseWrapper(oAuthMessage.getResponse());
-            commonAuthenticationHandler.doGet(requestWrapper, responseWrapper);
+
+            if (!oAuthMessage.isAPIBasedAuthRequest()) {
+                CommonAuthenticationHandler commonAuthenticationHandler = new CommonAuthenticationHandler();
+                commonAuthenticationHandler.doGet(requestWrapper, responseWrapper);
+            } else {
+                AuthenticationService authenticationService = new AuthenticationService();
+                AuthServiceResponse authServiceResponse = authenticationService.
+                        handleAuthentication(new AuthServiceRequest(requestWrapper, responseWrapper));
+                requestWrapper.setAttribute("authenticationServiceResponse", authServiceResponse);
+            }
 
             Object attribute = oAuthMessage.getRequest().getAttribute(FrameworkConstants.RequestParams.FLOW_STATUS);
             if (attribute != null) {
@@ -3717,7 +3897,7 @@ public class OAuth2AuthzEndpoint {
                         .setAttribute(FrameworkConstants.RequestParams.FLOW_STATUS, AuthenticatorFlowStatus.UNKNOWN);
                 return authorize(requestWrapper, oAuthMessage.getResponse());
             }
-        } catch (ServletException | IOException | URLBuilderException e) {
+        } catch (ServletException | IOException | URLBuilderException | AuthServiceException e) {
             log.error("Error occurred while sending request to authentication framework.");
             if (LoggerUtils.isDiagnosticLogsEnabled()) {
                 LoggerUtils.triggerDiagnosticLogEvent(new DiagnosticLog.DiagnosticLogBuilder(
