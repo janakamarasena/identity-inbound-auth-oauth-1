@@ -245,6 +245,8 @@
                         </resource>
                     </webResources>
                     <warName>oauth2</warName>
+                    <attachClasses>true</attachClasses>
+                    <classesClassifier>classes</classesClassifier>
                 </configuration>
             </plugin>
             <plugin>

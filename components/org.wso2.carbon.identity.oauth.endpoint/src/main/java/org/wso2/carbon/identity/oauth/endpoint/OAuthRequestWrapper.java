@@ -39,6 +39,8 @@ public class OAuthRequestWrapper extends HttpServletRequestWrapper {
     private Map<String, List<String>> form;
     private Enumeration<String> parameterNames;
 
+    private boolean isInternalRequest = false;
+
     @Deprecated
     public OAuthRequestWrapper(HttpServletRequest request, MultivaluedMap<String, String> form) {
 
@@ -66,7 +68,7 @@ public class OAuthRequestWrapper extends HttpServletRequestWrapper {
     public String getParameter(String name) {
 
         String value = super.getParameter(name);
-        if (value == null) {
+        if (value == null || isInternalRequest) {
             if (CollectionUtils.isNotEmpty(form.get(name))) {
                 value = form.get(name).get(0);
             }
@@ -78,5 +80,23 @@ public class OAuthRequestWrapper extends HttpServletRequestWrapper {
     public Enumeration<String> getParameterNames() {
 
         return parameterNames;
+    }
+
+    public void setInternalRequest(boolean internalRequest) {
+
+        isInternalRequest = internalRequest;
+    }
+
+    @Override
+    public Map<String, String[]> getParameterMap() {
+
+        Map<String, String[]> parameterMap = new java.util.HashMap<>(super.getParameterMap());
+
+        // add form data to parameterMap
+        for (Map.Entry<String, List<String>> entry : form.entrySet()) {
+            parameterMap.put(entry.getKey(), entry.getValue().toArray(new String[0]));
+        }
+
+        return parameterMap;
     }
 }
